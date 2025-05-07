@@ -1,0 +1,160 @@
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Collections.Generic;
+
+class SimpleHttpServer
+{
+    static Dictionary<Guid, (string state, string player1, string player2)> gameRecords = new();
+    static void Main(string[] args)
+    {
+        // 使用 Socket 创建服务器
+        Socket serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        serverSocket.Bind(new IPEndPoint(IPAddress.Any, 11000));
+        serverSocket.Listen(10);
+        Console.WriteLine("HTTP Server started on port 11000...");
+
+        while (true)
+        {
+            // 接受客户端连接
+            Socket clientSocket = serverSocket.Accept();
+            Console.WriteLine($"Client connected: {clientSocket.RemoteEndPoint}");
+
+            // 为每个客户端启动一个新线程
+            Thread clientThread = new Thread(() => HandleClient(clientSocket));
+            clientThread.Start();
+        }
+    }
+
+    static void HandleClient(Socket clientSocket)
+    {
+        try
+        {
+            byte[] buffer = new byte[4096];
+            int receivedBytes;
+            while ((receivedBytes = clientSocket.Receive(buffer)) > 0)
+            {
+                string requestText = Encoding.UTF8.GetString(buffer, 0, receivedBytes);
+                Console.WriteLine($"Request:\n{requestText}");
+
+                // 解析请求行（GET /register HTTP/1.1）
+                string[] requestLines = requestText.Split("\r\n");
+                string requestLine = requestLines[0];
+                string[] requestParts = requestLine.Split(' ');
+
+                // 仅处理 GET 请求
+                if (requestParts.Length < 3 || requestParts[0] != "GET")
+                {
+                    SendBadRequest(clientSocket);
+                    continue;
+                }
+
+                string url = requestParts[1];
+                if (url.StartsWith("/register"))
+                {
+                    HandleRegister(clientSocket);
+                }
+                else if (url.StartsWith("/pairme"))
+                {
+                    HandlePairMe(clientSocket, url);
+                }
+                else
+                {
+                    SendNotFound(clientSocket);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error: {ex.Message}");
+        }
+        finally
+        {
+            Console.WriteLine("Client disconnected.");
+            clientSocket.Close();
+        }
+    }
+
+    // 处理 /register 请求
+    static void HandleRegister(Socket clientSocket)
+    {
+        string username = "player" + new Random().Next(1000, 9999);
+        string jsonResponse = $"{{\"message\": \"Player registered successfully.\", \"username\": \"{username}\"}}";
+
+        SendHttpResponse(clientSocket, 200, "application/json", jsonResponse);
+    }
+
+    // 处理 /pairme 请求
+    static void HandlePairMe(Socket clientSocket, string url)
+    {
+        string username = GetQueryParameter(url, "player");
+        if (string.IsNullOrEmpty(username))
+        {
+            SendBadRequest(clientSocket);
+            return;
+        }
+
+        // 查找等待的玩家
+        foreach (var gameId in gameRecords.Keys)
+        {
+            var game = gameRecords[gameId];
+            if (game.state == "wait" && game.player2 == null)
+            {
+                // 配对成功
+                gameRecords[gameId] = ("progress", game.player1, username);
+                string jsonResponse = $"{{\"gameId\": \"{gameId}\", \"state\": \"progress\", \"player1\": \"{game.player1}\", \"player2\": \"{username}\"}}";
+                SendHttpResponse(clientSocket, 200, "application/json", jsonResponse);
+                return;
+            }
+        }
+
+        // 没有等待的玩家，创建新游戏记录
+        Guid newGameId = Guid.NewGuid();
+        gameRecords[newGameId] = ("wait", username, null);
+        string response = $"{{\"gameId\": \"{newGameId}\", \"state\": \"wait\", \"player1\": \"{username}\", \"player2\": null}}";
+        SendHttpResponse(clientSocket, 200, "application/json", response);
+    }
+
+    // 辅助函数：发送 HTTP 响应
+    static void SendHttpResponse(Socket clientSocket, int statusCode, string contentType, string content)
+    {
+        string response = $"HTTP/1.1 {statusCode} OK\r\n" +
+                          $"Content-Type: {contentType}\r\n" +
+                          $"Content-Length: {content.Length}\r\n" +
+                          $"Connection: keep-alive\r\n\r\n" +
+                          content;
+        clientSocket.Send(Encoding.UTF8.GetBytes(response));
+    }
+
+    // 辅助函数：发送 404 响应
+    static void SendNotFound(Socket clientSocket)
+    {
+        SendHttpResponse(clientSocket, 404, "text/plain", "404 Not Found");
+    }
+
+    // 辅助函数：发送 400 响应
+    static void SendBadRequest(Socket clientSocket)
+    {
+        SendHttpResponse(clientSocket, 400, "text/plain", "400 Bad Request");
+    }
+
+    // 解析 URL 中的查询参数
+    static string GetQueryParameter(string url, string key)
+    {
+        int queryIndex = url.IndexOf('?');
+        if (queryIndex < 0) return null;
+
+        string[] queryParams = url.Substring(queryIndex + 1).Split('&');
+        foreach (var param in queryParams)
+        {
+            string[] parts = param.Split('=');
+            if (parts.Length == 2 && parts[0] == key)
+            {
+                return parts[1];
+            }
+        }
+        return null;
+    }
+}
